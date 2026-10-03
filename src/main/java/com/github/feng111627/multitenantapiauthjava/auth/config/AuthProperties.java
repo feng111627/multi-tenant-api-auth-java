@@ -60,6 +60,10 @@ public class AuthProperties {
         private String owner;
         private java.util.List<String> scopes = new java.util.ArrayList<>();
         private long rateLimit = 100;
+        /** 默认突发上限；小于 0 表示未配置，运行时按 rateLimit 处理。 */
+        private long burstLimit = -1;
+        /** 按接口范围单独配置的配额，缺省的范围沿用默认 rateLimit/burstLimit。 */
+        private java.util.List<ScopeQuotaConfig> scopeQuotas = new java.util.ArrayList<>();
 
         public String getSecret() {
             return secret;
@@ -91,6 +95,56 @@ public class AuthProperties {
 
         public void setRateLimit(long rateLimit) {
             this.rateLimit = rateLimit;
+        }
+
+        public long getBurstLimit() {
+            return burstLimit;
+        }
+
+        public void setBurstLimit(long burstLimit) {
+            this.burstLimit = burstLimit;
+        }
+
+        public java.util.List<ScopeQuotaConfig> getScopeQuotas() {
+            return scopeQuotas;
+        }
+
+        public void setScopeQuotas(java.util.List<ScopeQuotaConfig> scopeQuotas) {
+            this.scopeQuotas = scopeQuotas;
+        }
+    }
+
+    /**
+     * 单个接口范围的配额配置。
+     */
+    public static class ScopeQuotaConfig {
+        private String scope;
+        private long rateLimit;
+        /** 突发上限；小于 0 表示未配置，运行时按该范围 rateLimit 处理。 */
+        private long burstLimit = -1;
+
+        public String getScope() {
+            return scope;
+        }
+
+        public void setScope(String scope) {
+            this.scope = scope;
+        }
+
+        public long getRateLimit() {
+            return rateLimit;
+        }
+
+        public void setRateLimit(long rateLimit) {
+            this.rateLimit = rateLimit;
+        }
+
+        public long getBurstLimit() {
+            return burstLimit;
+        }
+
+        public void setBurstLimit(long burstLimit) {
+            this.burstLimit = burstLimit;
         }
     }
 }

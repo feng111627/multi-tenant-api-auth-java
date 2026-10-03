@@ -37,4 +37,14 @@ public class OrderController {
     public Object list() {
         return orderService.listMine();
     }
+
+    /**
+     * 更"贵"的导出接口，使用独立的接口范围 {@code orders:export}，
+     * 可单独配置配额，与 read 范围互不挤占。
+     */
+    @RequireScope("orders:export")
+    @PostMapping("/export")
+    public Object export() {
+        return orderService.exportMine();
+    }
 }

@@ -1,6 +1,7 @@
 package com.github.feng111627.multitenantapiauthjava.auth.config;
 
 import com.github.feng111627.multitenantapiauthjava.auth.model.ClientCredentials;
+import com.github.feng111627.multitenantapiauthjava.auth.model.QuotaProfile;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
@@ -11,6 +12,11 @@ import java.util.stream.Collectors;
 
 /**
  * 客户端凭据注册表：启动时把 {@link AuthProperties} 中的配置物化为不可变注册表。
+ *
+ * <p>配额解析规则：每个客户端有一条默认配额（{@code rateLimit}/{@code burstLimit}），
+ * 另外可按 scope 单独配置；未单独配置的 scope 在运行时回落到默认配额。
+ * {@code burstLimit} 未配置（&lt; 0）时按同维度 {@code rateLimit} 归一，
+ * 因此老配置（只有 rate-limit）行为与固定额度完全一致。</p>
  */
 @Component
 public class ClientRegistry {
@@ -23,14 +29,33 @@ public class ClientRegistry {
             Set<String> scopes = cfg.getScopes() == null
                     ? Set.of()
                     : cfg.getScopes().stream().collect(Collectors.toUnmodifiableSet());
+
+            Map<String, QuotaProfile> scopeQuotas = new LinkedHashMap<>();
+            if (cfg.getScopeQuotas() != null) {
+                for (AuthProperties.ScopeQuotaConfig quota : cfg.getScopeQuotas()) {
+                    if (quota == null || quota.getScope() == null || quota.getScope().isBlank()) {
+                        continue;
+                    }
+                    scopeQuotas.put(quota.getScope(), new QuotaProfile(
+                            quota.getRateLimit(),
+                            normalizeBurst(quota.getBurstLimit(), quota.getRateLimit())));
+                }
+            }
+
             map.put(id, new ClientCredentials(
                     id,
                     cfg.getSecret(),
                     scopes,
                     cfg.getOwner(),
-                    cfg.getRateLimit()));
+                    cfg.getRateLimit(),
+                    normalizeBurst(cfg.getBurstLimit(), cfg.getRateLimit()),
+                    Map.copyOf(scopeQuotas)));
         });
         this.clients = Map.copyOf(map);
+    }
+
+    private static long normalizeBurst(long burstLimit, long rateLimit) {
+        return burstLimit >= 0 ? burstLimit : rateLimit;
     }
 
     public Optional<ClientCredentials> find(String clientId) {

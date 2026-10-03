@@ -2,6 +2,7 @@ package com.github.feng111627.multitenantapiauthjava.tests.support;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.feng111627.multitenantapiauthjava.auth.rate.QuotaService;
 import org.junit.jupiter.api.BeforeEach;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +31,10 @@ public abstract class AbstractApiIntegrationTest {
             "c2VjcmV0LWxpbWl0ZWQtc2VjcmV0LWxpbWl0ZWQtc2VjcmV0LQ==";
     public static final String SECRET_NOREAD =
             "c2VjcmV0LW5vcmVhZC1zZWNyZXQtbm9yZWFkLXNlY3JldC0=";
+    public static final String SECRET_MULTISCOPE =
+            "c2VjcmV0LW11bHRpc2NvcGUtc2VjcmV0LW11bHRpc2NvcGUtc2VjcmV0LQ==";
+    public static final String SECRET_BURST =
+            "c2VjcmV0LWJ1cnN0LXNlY3JldC1idXJzdC1zZWNyZXQt";
 
     @LocalServerPort
     protected int port;
@@ -37,10 +42,15 @@ public abstract class AbstractApiIntegrationTest {
     @Autowired
     protected ObjectMapper objectMapper;
 
+    @Autowired
+    protected QuotaService quotaService;
+
     protected HttpClient httpClient;
 
     @BeforeEach
     void initClient() {
+        // 每个用例前清空令牌桶，避免配额状态在共享的 Spring 上下文里跨用例残留
+        quotaService.reset();
         httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();

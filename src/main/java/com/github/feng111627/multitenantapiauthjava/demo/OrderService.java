@@ -49,6 +49,17 @@ public class OrderService {
                 .toList();
     }
 
+    /**
+     * 导出当前客户端归属下的全部订单（演示另一个更"贵"的接口范围
+     * {@code orders:export}，配额独立于 {@code orders:read}）。
+     */
+    public List<Order> exportMine() {
+        ClientCredentials client = requireClient();
+        return STORE.stream()
+                .filter(order -> order.ownerId().equals(client.ownerId()))
+                .toList();
+    }
+
     private static ClientCredentials requireClient() {
         ClientCredentials client = ClientContext.get();
         if (client == null) {
