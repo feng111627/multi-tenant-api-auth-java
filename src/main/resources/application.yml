@@ -1,0 +1,105 @@
+# 分范围配额客户端配置。
+# 放在 YAML 中是因为 scope 名含冒号（如 orders:read），
+# 在 .properties 的扁平化 key 里冒号会被当作分隔符导致绑定失败。
+# 其余通用配置仍在 application.properties（两者合并生效）。
+app:
+  auth:
+    clients:
+      # client-scoped：分范围配额验证
+      # orders:read 独立配额：稳态 2/窗口 + 突发余量 2（可一次冲 4 个，之后平滑回到 2/窗口）
+      # orders:ping 独立配额：稳态 5，无突发；两个范围各算各的账，互不挤占
+      client-scoped:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTA=
+        owner: tenant-a
+        scopes:
+          - orders:read
+          - orders:ping
+        rate-limit: 1000
+        scope-quotas:
+          "orders:read":
+            rate-limit: 2
+            burst: 2
+          "orders:ping":
+            rate-limit: 5
+            burst: 0
+      # client-default：orders:ping 未单独配配额，必须沿用客户端默认 rate-limit=2（旧行为）
+      client-default:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTE=
+        owner: tenant-a
+        scopes:
+          - orders:ping
+        rate-limit: 2
+      # client-edge：专用于分范围并发达界测试，orders:ping 稳态 3 + 突发 0，桶容量恰为 3
+      client-edge:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTI=
+        owner: tenant-a
+        scopes:
+          - orders:ping
+        rate-limit: 1000
+        scope-quotas:
+          "orders:ping":
+            rate-limit: 3
+            burst: 0
+      # 以下两个客户端与 client-scoped 配额相同，分别供不同测试方法使用，
+      # 避免集成测试共享同一个 Spring 上下文时分范围桶状态互相干扰
+      client-scoped-2:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTM=
+        owner: tenant-a
+        scopes:
+          - orders:read
+          - orders:ping
+        rate-limit: 1000
+        scope-quotas:
+          "orders:read":
+            rate-limit: 2
+            burst: 2
+          "orders:ping":
+            rate-limit: 5
+            burst: 0
+      client-scoped-3:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTQ=
+        owner: tenant-a
+        scopes:
+          - orders:read
+        rate-limit: 1000
+        scope-quotas:
+          "orders:read":
+            rate-limit: 2
+            burst: 2
+      # client-edge-2：与 client-edge 配额相同，供 QuotaAbuseIntegrationTest 的第二个方法独立使用
+      client-edge-2:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTU=
+        owner: tenant-a
+        scopes:
+          - orders:ping
+        rate-limit: 1000
+        scope-quotas:
+          "orders:ping":
+            rate-limit: 3
+            burst: 0
+      # client-edge-3：两范围各 3 个名额，供并发跨范围不串号测试独立使用
+      client-edge-3:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTY=
+        owner: tenant-a
+        scopes:
+          - orders:ping
+          - orders:read
+        rate-limit: 1000
+        scope-quotas:
+          "orders:ping":
+            rate-limit: 3
+            burst: 0
+          "orders:read":
+            rate-limit: 3
+            burst: 0
+      # client-edge-4：单范围 3 个名额，供并发达界测试独立使用
+      client-edge-4:
+        secret: c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTc=
+        owner: tenant-a
+        scopes:
+          - orders:ping
+        rate-limit: 1000
+        scope-quotas:
+          "orders:ping":
+            rate-limit: 3
+            burst: 0

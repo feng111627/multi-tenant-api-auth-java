@@ -60,6 +60,8 @@ public class AuthProperties {
         private String owner;
         private java.util.List<String> scopes = new java.util.ArrayList<>();
         private long rateLimit = 100;
+        /** 分范围配额，key 为 scope 标识；未配置的 scope 沿用 {@link #rateLimit}。 */
+        private Map<String, ScopeQuota> scopeQuotas = new LinkedHashMap<>();
 
         public String getSecret() {
             return secret;
@@ -91,6 +93,40 @@ public class AuthProperties {
 
         public void setRateLimit(long rateLimit) {
             this.rateLimit = rateLimit;
+        }
+
+        public Map<String, ScopeQuota> getScopeQuotas() {
+            return scopeQuotas;
+        }
+
+        public void setScopeQuotas(Map<String, ScopeQuota> scopeQuotas) {
+            this.scopeQuotas = scopeQuotas;
+        }
+    }
+
+    /**
+     * 单个 scope 的配额配置：稳态限额 {@code rateLimit} 加突发余量 {@code burst}。
+     */
+    public static class ScopeQuota {
+        /** 稳态限额：每个统计窗口的令牌补充量；&lt;=0 时沿用客户端默认 {@code rate-limit}。 */
+        private long rateLimit = 0;
+        /** 突发余量：在稳态限额之上额外允许的一次性请求数，默认 0（行为与固定窗口一致）。 */
+        private long burst = 0;
+
+        public long getRateLimit() {
+            return rateLimit;
+        }
+
+        public void setRateLimit(long rateLimit) {
+            this.rateLimit = rateLimit;
+        }
+
+        public long getBurst() {
+            return burst;
+        }
+
+        public void setBurst(long burst) {
+            this.burst = burst;
         }
     }
 }

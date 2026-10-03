@@ -8,6 +8,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Map;
+
 /**
  * 对外的订单接口（需要鉴权）。
  */
@@ -36,5 +38,15 @@ public class OrderController {
     @PostMapping("/list")
     public Object list() {
         return orderService.listMine();
+    }
+
+    /**
+     * 轻量探活接口，挂在独立 scope {@code orders:ping} 上，
+     * 用于演示"同一客户端不同接口范围各算各的配额"。
+     */
+    @RequireScope("orders:ping")
+    @PostMapping("/ping")
+    public Map<String, String> ping() {
+        return Map.of("status", "pong");
     }
 }

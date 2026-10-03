@@ -18,8 +18,15 @@ import java.util.UUID;
 
 /**
  * 集成测试基类：启动随机端口的真实 Web 容器，以外部客户端的视角发签名请求。
+ *
+ * <p>把稳态补充窗口拉长到 6 小时：分范围令牌桶在测试执行期间几乎不补充令牌，
+ * 突发/见底/临界判定不依赖真实时间流逝，可稳定复现；令牌的平滑补充与回收
+ * 由 ScopeTokenBucketLimiterTest 用可控时钟专门覆盖。
+ * 该属性只覆盖单键，不会遮蔽主 application.properties 中的客户端注册表。</p>
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "app.auth.rate-window-seconds=21600")
 public abstract class AbstractApiIntegrationTest {
 
     protected final Logger log = LoggerFactory.getLogger(getClass());
@@ -30,6 +37,20 @@ public abstract class AbstractApiIntegrationTest {
             "c2VjcmV0LWxpbWl0ZWQtc2VjcmV0LWxpbWl0ZWQtc2VjcmV0LQ==";
     public static final String SECRET_NOREAD =
             "c2VjcmV0LW5vcmVhZC1zZWNyZXQtbm9yZWFkLXNlY3JldC0=";
+    public static final String SECRET_DEFAULT =
+            "c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTE=";
+    public static final String SECRET_EDGE =
+            "c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTI=";
+    public static final String SECRET_SCOPED_2 =
+            "c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTM=";
+    public static final String SECRET_SCOPED_3 =
+            "c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTQ=";
+    public static final String SECRET_EDGE_2 =
+            "c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTU=";
+    public static final String SECRET_EDGE_3 =
+            "c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTY=";
+    public static final String SECRET_EDGE_4 =
+            "c2VjcmV0LXRlc3Qtc2VjcmV0LXRlc3Qtc2VjcmV0LTc=";
 
     @LocalServerPort
     protected int port;

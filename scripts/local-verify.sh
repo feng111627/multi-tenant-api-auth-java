@@ -3,11 +3,12 @@
 set -u
 cd "$(dirname "$0")/.."
 
-PORT=18080
+PORT="${VERIFY_PORT:-19090}"
 BASE="http://localhost:${PORT}"
 SECRET_A="secret-a-secret-a-secret-"
 SECRET_NOREAD="secret-noread-secret-noread-secret-"
 SECRET_LIMITED="secret-limited-secret-limited-secret-"
+SECRET_SCOPED="secret-test-secret-test-secret-0"
 
 if ! command -v openssl >/dev/null || ! command -v curl >/dev/null; then
   echo "需要 openssl 与 curl" >&2
@@ -29,13 +30,13 @@ for _ in $(seq 1 30); do
 done
 
 call() {
-  local client_id="$1" secret="$2" nonce="$3" body="$4"
+  local client_id="$1" secret="$2" nonce="$3" body="$4" path="${5:-/api/orders/get}"
   local ts body_hash canon sig
   ts=$(date +%s)
   body_hash=$(printf '%s' "$body" | openssl dgst -sha256 | awk '{print $NF}')
-  canon=$(printf 'POST\n/api/orders/get\n%s\n%s\n%s' "$ts" "$nonce" "$body_hash")
+  canon=$(printf 'POST\n%s\n%s\n%s\n%s' "$path" "$ts" "$nonce" "$body_hash")
   sig=$(printf '%s' "$canon" | openssl dgst -sha256 -hmac "$secret" -binary | base64 -w0)
-  curl -s -w '\n[HTTP %{http_code}]' "$BASE/api/orders/get" \
+  curl -s -w '\n[HTTP %{http_code}]' "$BASE$path" \
     -H 'Content-Type: application/json' \
     -H "X-Client-Id: $client_id" \
     -H "X-Timestamp: $ts" \
@@ -67,10 +68,23 @@ call client-noread "$SECRET_NOREAD" "nonce-$(date +%s%N)" '{"orderId":"ORD-1001"
 echo; echo; echo "== 5. 数据归属越权（client-a 查 tenant-b 的 ORD-2001）"
 call client-a "$SECRET_A" "nonce-$(date +%s%N)" '{"orderId":"ORD-2001"}'
 
-echo; echo; echo "== 6. 限流（client-limited 限额 3，连发 4 次）"
+echo; echo; echo "== 6. 默认窗口限流（client-limited 限额 3，连发 4 次）"
 for i in 1 2 3 4; do
   echo "--- 第 $i 次："
   call client-limited "$SECRET_LIMITED" "nonce-rl-$i-$(date +%s%N)" '{"orderId":"ORD-1001"}'
+  echo
+done
+
+echo; echo "== 7. 分范围配额（client-scoped：orders:read 稳态2+突发2=4）"
+for i in 1 2 3 4 5; do
+  echo "--- orders:read 第 $i 次（前 4 次 200，第 5 次 429）："
+  call client-scoped "$SECRET_SCOPED" "nonce-read-$i-$(date +%s%N)" '{}' /api/orders/list
+  echo
+done
+echo "--- orders:ping 是另一本账（容量 5，不受 read 打空影响），连发 6 次："
+for i in 1 2 3 4 5 6; do
+  echo "--- ping 第 $i 次："
+  call client-scoped "$SECRET_SCOPED" "nonce-ping-$i-$(date +%s%N)" '{}' /api/orders/ping
   echo
 done
 

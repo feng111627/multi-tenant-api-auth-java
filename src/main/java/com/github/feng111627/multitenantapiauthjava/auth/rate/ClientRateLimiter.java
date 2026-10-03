@@ -30,6 +30,14 @@ public class ClientRateLimiter {
      * @return true 放行；false 表示已超出限额
      */
     public boolean tryAcquire(String clientId, long limit, long windowMillis) {
+        return tryAcquireDecision(clientId, limit, windowMillis).allowed();
+    }
+
+    /**
+     * 与 {@link #tryAcquire} 相同的原子判定，额外返回本窗口剩余名额，
+     * 供配额门面统一记录日志。
+     */
+    public QuotaDecision tryAcquireDecision(String clientId, long limit, long windowMillis) {
         long now = System.currentTimeMillis();
         Window window = windows.compute(clientId, (id, current) -> {
             if (current == null || now - current.startMillis() >= windowMillis) {
@@ -38,6 +46,11 @@ public class ClientRateLimiter {
             return current;
         });
         long used = window.count().incrementAndGet();
-        return used <= limit;
+        if (used <= limit) {
+            return new QuotaDecision(true, Math.max(0, limit - used),
+                    null, QuotaDecision.BUCKET_DEFAULT, limit, 0);
+        }
+        return new QuotaDecision(false, 0,
+                null, QuotaDecision.BUCKET_DEFAULT, limit, 0);
     }
 }
