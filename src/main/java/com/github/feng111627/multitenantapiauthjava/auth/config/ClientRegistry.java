@@ -14,9 +14,12 @@ import java.util.stream.Collectors;
  * 客户端凭据注册表：启动时把 {@link AuthProperties} 中的配置物化为不可变注册表。
  *
  * <p>配额解析规则：每个客户端有一条默认配额（{@code rateLimit}/{@code burstLimit}），
- * 另外可按 scope 单独配置；未单独配置的 scope 在运行时回落到默认配额。
- * {@code burstLimit} 未配置（&lt; 0）时按同维度 {@code rateLimit} 归一，
- * 因此老配置（只有 rate-limit）行为与固定额度完全一致。</p>
+ * 另外可按 scope 单独配置；未单独配置的 scope 在运行时回落到默认配额——默认配额
+ * 整个客户端只有一份，由所有回落到它的范围共用（见
+ * {@link com.github.feng111627.multitenantapiauthjava.auth.rate.QuotaService}）。
+ * {@code burstLimit} 未配置（&lt; 0）时按同维度 {@code rateLimit} 归一，同时把
+ * {@code burstConfigured} 置为 {@code false}，供运行时对老配置走与拆分前一致的
+ * 固定窗口计量。</p>
  */
 @Component
 public class ClientRegistry {
@@ -49,6 +52,7 @@ public class ClientRegistry {
                     cfg.getOwner(),
                     cfg.getRateLimit(),
                     normalizeBurst(cfg.getBurstLimit(), cfg.getRateLimit()),
+                    cfg.getBurstLimit() >= 0,
                     Map.copyOf(scopeQuotas)));
         });
         this.clients = Map.copyOf(map);

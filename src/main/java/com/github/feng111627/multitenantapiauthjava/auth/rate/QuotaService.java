@@ -5,11 +5,13 @@ import org.springframework.stereotype.Component;
 import java.time.Clock;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 按「客户端 × 接口范围」维度的配额服务（令牌桶）。
+ * 配额服务：按调用方给定的维度维护两类相互独立的限流状态。
  *
- * <p>每个 {@code (clientId, scope)} 维护一个独立令牌桶：</p>
+ * <p><b>1. 令牌桶（按 {@code (clientId, scope)} 维度）</b>——用于单独配置了配额的
+ * 接口范围，以及显式配置了突发余量的客户端默认配额：</p>
  * <ul>
  *     <li><b>稳态速率</b>：每 {@code windowMillis} 匀速补充 {@code rateLimit} 个令牌，
  *         因此突发流量过去后会平滑收回到稳态速率，不会出现"长时间不放行、然后成片放开"的抖动；</li>
@@ -18,18 +20,32 @@ import java.util.concurrent.ConcurrentHashMap;
  *     <li><b>互不挤占</b>：不同 scope 使用不同的桶；客户端默认配额与各范围配额分别独立计数。</li>
  * </ul>
  *
+ * <p><b>2. 固定窗口计数器（按 {@code clientId} 维度）</b>——用于只配置了
+ * {@code rate-limit}、没有配置突发余量的老客户端的默认配额：整个客户端共用一份
+ * 窗口计数，窗口切换时原子重置，每个窗口内严格最多放行 {@code rateLimit} 个请求。
+ * 这与"按接口范围拆分配额"上线前的行为逐点一致：被授予多个接口范围、但都没有
+ * 单独配置范围额度的老客户端，跨范围合计共享同一份默认额度，不会被放大成
+ * "每个范围各一份"。</p>
+ *
  * <p>令牌数以"毫令牌"（令牌 × 1000）的整数保存并做补充运算，避免浮点误差在临界值上
  * 造成判定漂移。单次"补充 → 判定 → 扣减"在桶对象锁内一次完成，因此突发见底时
  * 并发压到边界（最后一个放行、下一个拒绝）的结果与线程调度无关，重跑一致。</p>
  *
- * <p>桶只会在调用方（拦截器）完成身份与签名校验之后创建，scope 键取自服务端注解，
- * 伪造的 clientId/请求参数无法制造桶，桶总数有界。</p>
+ * <p>桶/窗口只会在调用方（拦截器）完成身份与签名校验之后创建，scope 键取自服务端注解，
+ * 伪造的 clientId/请求参数无法制造限流状态，状态总数有界。</p>
  */
 @Component
 public class QuotaService {
 
     /** 未标注 {@code @RequireScope} 的接口所使用的兜底范围键。 */
     public static final String DEFAULT_SCOPE = "-";
+
+    /**
+     * 客户端默认配额（共享桶）在令牌桶维度上使用的范围键。
+     * 所有未单独配置配额的范围回落到默认配额时，共用这一个桶，
+     * 保证"默认额度整个客户端只有一份"，跨范围合计不会超发。
+     */
+    public static final String SHARED_DEFAULT_SCOPE = "-default-";
 
     /** 令牌放大倍数：内部以毫令牌为最小单位，消除浮点误差。 */
     private static final long MILLI = 1000L;
@@ -39,6 +55,7 @@ public class QuotaService {
 
     private final Clock clock;
     private final Map<String, TokenBucket> buckets = new ConcurrentHashMap<>();
+    private final Map<String, Window> windows = new ConcurrentHashMap<>();
 
     public QuotaService() {
         this(Clock.systemUTC());
@@ -74,10 +91,54 @@ public class QuotaService {
     }
 
     /**
-     * 清空所有桶状态。仅供测试在用例之间重置，保证配额断言不受其它用例残留状态影响。
+     * 在客户端级共享固定窗口上尝试占用一个请求名额（老配置默认配额的计量方式）。
+     *
+     * <p>语义与"按范围拆分配额"上线前的全局限流器逐点一致：窗口以下一次请求
+     * 到达时间锚定，窗口内计数达到 {@code limit} 即拒，窗口期满（距窗口起点
+     * {@code >= windowMillis}）后下一个请求原子地开启新窗口。每个窗口内严格
+     * 最多放行 {@code limit} 个请求——不会在某一小段多放一批、也不会在窗口
+     * 切换后长时间卡着不放；给定相同的时间序列，放行/拒绝结果逐次相同。</p>
+     *
+     * <p>键只含 clientId：同一个客户端的所有未单独配置配额的范围共用这一份
+     * 默认额度，跨范围合计严格不超过 {@code limit}/窗口。</p>
+     *
+     * @param clientId     客户端标识（调用方必须已确认该客户端存在且通过校验）
+     * @param limit        每个窗口最大放行数（默认稳态速率）
+     * @param windowMillis 窗口长度（毫秒）
+     * @return true 放行；false 表示该客户端本窗口的默认额度已用尽
+     */
+    public boolean tryAcquireSharedFixedWindow(String clientId, long limit, long windowMillis) {
+        long now = clock.millis();
+        long safeLimit = Math.max(limit, 0);
+        long safeWindow = windowMillis > 0 ? windowMillis : 1L;
+
+        // compute 原子完成"取窗口 / 期满重开"，并发下同一时刻只有一个当前窗口
+        Window window = windows.compute(clientId, (id, current) -> {
+            if (current == null || now - current.startMillis() >= safeWindow) {
+                return new Window(now);
+            }
+            return current;
+        });
+        return window.count().incrementAndGet() <= safeLimit;
+    }
+
+    /**
+     * 清空所有桶与窗口状态。仅供测试在用例之间重置，保证配额断言不受其它用例残留状态影响。
      */
     public void reset() {
         buckets.clear();
+        windows.clear();
+    }
+
+    /**
+     * 单个客户端的固定窗口计数（老配置默认配额）。窗口更换由外层
+     * {@link ConcurrentHashMap#compute} 原子完成，窗口内计数用 {@link AtomicLong}，
+     * 因此并发压到边界时"恰好最后 {@code limit} 个放行、下一个拒绝"与线程调度无关。
+     */
+    private record Window(long startMillis, AtomicLong count) {
+        private Window(long startMillis) {
+            this(startMillis, new AtomicLong(0));
+        }
     }
 
     /**

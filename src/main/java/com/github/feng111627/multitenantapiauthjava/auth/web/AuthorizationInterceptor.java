@@ -98,13 +98,12 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
 
         QuotaProfile quota = resolveQuota(client, scope);
         long windowMillis = properties.getRateWindowSeconds() * 1000L;
-        boolean allowed = quotaService.tryAcquire(
-                client.clientId(), scope,
-                quota.rateLimit(), quota.burstLimit(), windowMillis);
+        boolean allowed = tryAcquireQuota(client, scope, quota, windowMillis);
         if (!allowed) {
-            log.warn("quota exhausted clientId={} scope={} requestId={} rate={} burst={} window={}s",
+            log.warn("quota exhausted clientId={} scope={} requestId={} rate={} burst={} window={}s sharedDefault={}",
                     client.clientId(), scope, requestId,
-                    quota.rateLimit(), quota.burstLimit(), properties.getRateWindowSeconds());
+                    quota.rateLimit(), quota.burstLimit(), properties.getRateWindowSeconds(),
+                    isSharedDefault(client, scope));
             reject(requestId, client.clientId(), scope, ErrorCode.RATE_LIMITED,
                     "rate limit " + quota.rateLimit() + " per "
                             + properties.getRateWindowSeconds() + "s exceeded for scope '"
@@ -127,6 +126,37 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             return scoped;
         }
         return new QuotaProfile(client.rateLimit(), client.burstLimit());
+    }
+
+    /** 本次请求是否落在"客户端共享默认配额"上（该范围没有单独配置配额）。 */
+    private static boolean isSharedDefault(ClientCredentials client, String scope) {
+        return !client.scopeQuotas().containsKey(scope);
+    }
+
+    /**
+     * 按配额来源选择计量方式：
+     * <ul>
+     *     <li>范围单独配置了配额 → 该范围自己的令牌桶，各范围各算各的账、互不挤占；</li>
+     *     <li>回落默认配额且显式配置了突发余量 → 客户端级共享令牌桶
+     *         （{@link QuotaService#SHARED_DEFAULT_SCOPE}），所有回落范围共用一份额度；</li>
+     *     <li>回落默认配额且没配突发余量（老配置）→ 客户端级共享固定窗口，
+     *         每窗口严格 {@code rateLimit} 个，窗口切换行为与按范围拆分上线前完全一致。</li>
+     * </ul>
+     * 后两种都以客户端为唯一键，因此被授予多个范围、但都没单独配额的老客户端，
+     * 跨范围合计也只有一份默认额度，不会被放大。
+     */
+    private boolean tryAcquireQuota(ClientCredentials client, String scope,
+                                    QuotaProfile quota, long windowMillis) {
+        if (!isSharedDefault(client, scope)) {
+            return quotaService.tryAcquire(client.clientId(), scope,
+                    quota.rateLimit(), quota.burstLimit(), windowMillis);
+        }
+        if (client.burstConfigured()) {
+            return quotaService.tryAcquire(client.clientId(), QuotaService.SHARED_DEFAULT_SCOPE,
+                    quota.rateLimit(), quota.burstLimit(), windowMillis);
+        }
+        return quotaService.tryAcquireSharedFixedWindow(
+                client.clientId(), quota.rateLimit(), windowMillis);
     }
 
     @Override

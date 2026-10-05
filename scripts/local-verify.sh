@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 本地冒烟验证：启动应用后依次演示
-# 正常/错误签名/重放/越权(scope)/跨租户/配额临界/分范围独立/突发余量/无效请求不计费
+# 正常/错误签名/重放/越权(scope)/跨租户/配额临界/分范围独立/突发余量/老配置共享默认额度/无效请求不计费
 set -u
 cd "$(dirname "$0")/.."
 
@@ -11,6 +11,7 @@ SECRET_NOREAD="secret-noread-secret-noread-secret-"
 SECRET_LIMITED="secret-limited-secret-limited-secret-"
 SECRET_MULTISCOPE="secret-multiscope-secret-multiscope-secret-"
 SECRET_BURST="secret-burst-secret-burst-secret-"
+SECRET_LEGACY="secret-legacy-secret-legacy-secret-"
 
 if ! command -v openssl >/dev/null || ! command -v curl >/dev/null; then
   echo "需要 openssl 与 curl" >&2
@@ -109,14 +110,27 @@ for i in $(seq 1 7); do
   echo
 done
 
-echo; echo "== 9. 无效请求不计费（伪造签名打 client-burst，随后真实额度应仍在）"
+echo; echo "== 8b. 显式突发的共享默认桶（client-burst 的 export 与 read 共用同一份突发容量）"
+echo "--- 上一节 read 已用掉 5 个突发，export 也应立即 429（不是各范围各一桶）："
+call client-burst "$SECRET_BURST" "nonce-burst-export-$(date +%s%N)" '{}' /api/orders/export
+
+echo; echo "== 9. 老配置共享默认额度（client-legacy：read+export 两个范围、只配 rate-limit=4）"
+echo "--- 交替打两个范围 6 次：预期前 4 个 200、后 2 个 429（跨范围合计只有一份默认额度）"
+for i in $(seq 1 6); do
+  if [ $((i % 2)) -eq 1 ]; then path=/api/orders/list; else path=/api/orders/export; fi
+  echo "--- legacy 第 $i 次（$path）："
+  call client-legacy "$SECRET_LEGACY" "nonce-legacy-$i-$(date +%s%N)" '{}' "$path"
+  echo
+done
+
+echo; echo "== 10. 无效请求不计费（伪造签名打 client-legacy，随后真实额度应仍在）"
 for i in $(seq 1 5); do
   ts=$(date +%s); n="nonce-forged-$i-$(date +%s%N)"
   curl -s -o /dev/null -w "forged #$i [HTTP %{http_code}]\n" "$BASE/api/orders/list" \
-    -H 'Content-Type: application/json' -H "X-Client-Id: client-burst" \
+    -H 'Content-Type: application/json' -H "X-Client-Id: client-legacy" \
     -H "X-Timestamp: $ts" -H "X-Nonce: $n" \
     -H "X-Signature: dGhpcy1pcy1hLWJhZC1zaWduYXR1cmU=" -d '{}'
 done
-echo "（注意：上一节 client-burst 已用掉突发额度；这里的伪造请求全部 401，不会再扣额度。）"
+echo "（注意：上一节 client-legacy 已用掉共享默认额度；这里的伪造请求全部 401，不会再扣额度。）"
 
 echo; echo "==> 完成，关闭服务"
