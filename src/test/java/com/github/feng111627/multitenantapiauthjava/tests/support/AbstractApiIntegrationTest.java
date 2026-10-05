@@ -35,6 +35,10 @@ public abstract class AbstractApiIntegrationTest {
             "c2VjcmV0LW11bHRpc2NvcGUtc2VjcmV0LW11bHRpc2NvcGUtc2VjcmV0LQ==";
     public static final String SECRET_BURST =
             "c2VjcmV0LWJ1cnN0LXNlY3JldC1idXJzdC1zZWNyZXQt";
+    public static final String SECRET_LEGACY =
+            "c2VjcmV0LWxlZ2FjeS1zZWNyZXQtbGVnYWN5LXNlY3JldC0=";
+    public static final String SECRET_MIXED =
+            "c2VjcmV0LW1peGVkLXNlY3JldC1taXhlZC1zZWNyZXQt";
 
     @LocalServerPort
     protected int port;

@@ -12,9 +12,9 @@
 | `secret` | HMAC 密钥（Base64 编码），仅客户端与服务端持有，不随请求传输 |
 | `scopes` | 允许访问的接口范围，例如 `orders:read` |
 | `owner` | 数据归属标识（租户），业务查询强制按它过滤数据 |
-| `rateLimit` | 默认稳态速率：每个统计窗口稳定允许的请求数，未单独配置配额的范围沿用它 |
-| `burstLimit` | 默认突发上限：短时间最多可一次性冲过的请求数；不配置时等于 `rateLimit`（无额外突发余量） |
-| `scopeQuotas[n]` | 按接口范围单独配置的 `scope/rateLimit/burstLimit`；各范围独立计数、互不挤占，缺省范围回落到默认配额 |
+| `rateLimit` | 默认稳态速率：每个统计窗口稳定允许的请求数；未单独配置配额的所有范围**共用**这一份默认额度 |
+| `burstLimit` | 默认突发上限：短时间最多可一次性冲过的请求数；不配置时默认额度按固定窗口计量（见下文"配额模型"） |
+| `scopeQuotas[n]` | 按接口范围单独配置的 `scope/rateLimit/burstLimit`；配了的范围各自独立计数、互不挤占，没配的范围共用客户端默认额度 |
 
 一次请求要通过以下全部判定（顺序固定，每一步拒绝原因可区分）：
 
@@ -24,7 +24,7 @@
 4. **签名验证**：服务端按同一规范串重算 HMAC-SHA256 并恒定时间比较，不一致 `AUTH_INVALID_SIGNATURE`；
 5. **重放检测**：同一 `clientId + nonce` 在 TTL 窗口（默认 600 秒）内只能成功使用一次，重复提交 `AUTH_REPLAY_DETECTED`；
 6. **范围控制**：接口上的 `@RequireScope` 必须包含在客户端的 `scopes` 中，否则 `ACCESS_DENIED`；
-7. **配额（令牌桶）**：按「客户端 × 本次接口范围」维度判定，超额 `RATE_LIMITED`；
+7. **配额**：按"默认额度 / 分范围额度"规则判定（见下文配额模型），超额 `RATE_LIMITED`；
 8. **数据归属控制**：业务层从 `ClientContext`（ThreadLocal，请求结束即清理）取 `owner`，所有数据查询强制带 owner 过滤。即使知道他人资源 ID，也查不到数据，也无法在列表中看到他人数据。
 
 > **配额在验签与范围校验通过之后才计数**：任何未通过身份/签名/时间戳/重放/范围校验的请求
@@ -32,30 +32,53 @@
 > 也无法消耗该客户端真正可用的额度，更不会被算到别的客户端头上——配额桶的键固定为
 > 服务端确认过的 `clientId` 与接口 `scope`。
 
-### 配额模型（令牌桶：稳态速率 + 突发余量）
+### 配额模型（默认额度 + 分范围额度）
 
-每个 `(clientId, scope)` 拥有一个相互独立的令牌桶：
+**默认额度与分范围额度的关系**：每个客户端有且只有一份默认额度
+（`rate-limit`/`burst-limit`）。`scope-quotas` 里单独配置过的接口范围各自拥有
+独立的配额、各算各的账；**所有未单独配置的范围共用同一份默认额度**——同一客户端
+被授予多个接口范围时，这些范围的请求合并计量，跨范围合计也不会超过这一份默认
+额度（与"按接口范围拆分"之前的整体限额语义一致）。
 
-- **稳态额度（`rateLimit`）**：每 `rate-window-seconds`（默认 60 秒）匀速补充 `rateLimit`
-  个令牌。持续压测时吞吐稳定收敛到该速率；突发流量过去后自动平滑收回，不会出现
-  "长时间一个不放、然后一次性放开一大片"的抖动；
-- **突发余量（`burstLimit`）**：桶容量即突发上限，桶初始为满。客户端短时间冲一波，
-  只要不超过 `burstLimit` 就整波放行；令牌用尽后新请求立即 429，随后按稳态速率逐枚补充；
-- **分范围独立**：某接口范围配置了 `scopeQuotas` 就用该范围自己的桶；没配的范围沿用
-  客户端默认 `rateLimit/burstLimit`。不同范围各算各的账，互不挤占；
-- **老配置兼容**：只配 `rate-limit` 时，`burstLimit` 自动等于 `rateLimit`，
-  且桶初始为满——在"一个窗口内连发"这种原有用法下，仍是前 `rateLimit` 个放行、
-  其后 429，行为与旧版固定额度保持一致（唯一语义差异是跨窗口由"硬重置"变为"匀速补充"，
-  对正常调用更平滑友好）。
+计量方式分两种，按配置自动选择：
+
+- **固定窗口（老配置语义）**：只配 `rate-limit`、没配 `burst-limit` 的客户端，
+  默认额度按固定窗口计量——每个 `rate-window-seconds` 窗口严格放行 `rate-limit`
+  个请求，窗口期满后整体重置。首窗口不会多放一批，窗口切换后立即恢复全量、
+  不会卡着不放；给定相同的请求时间序列，放行/拒绝结果逐次相同、可稳定复现。
+  这与拆分之前旧版限流器的行为完全一致；
+- **令牌桶（稳态速率 + 突发余量）**：显式配置了 `burst-limit` 的默认额度、以及
+  所有 `scope-quotas` 分范围配额，按令牌桶计量——
+  - **稳态额度（`rateLimit`）**：每 `rate-window-seconds`（默认 60 秒）匀速补充
+    `rateLimit` 个令牌。持续压测时吞吐稳定收敛到该速率；突发流量过去后自动平滑收回，
+    不会出现"长时间一个不放、然后一次性放开一大片"的抖动；
+  - **突发余量（`burstLimit`）**：桶容量即突发上限，桶初始为满。短时间冲一波，
+    只要不超过 `burstLimit` 就整波放行；令牌用尽后新请求立即 429，随后按稳态速率
+    逐枚补充；
+  - **分范围独立**：每个 `scope-quotas` 范围一个独立的桶，互不挤占；
+  - 分范围配额缺省 `burst-limit` 时取该范围的 `rate-limit`（无额外突发余量，
+    但仍是令牌桶：匀速补充、平滑回收）。
+
+### 老配置兼容性：哪些变、哪些不变
+
+| 老配置形态 | 行为 |
+| --- | --- |
+| 只配 `rate-limit`（单个范围） | **不变**：每窗口放行 `rate-limit` 个、窗口期满整体重置，与拆分前一致 |
+| 只配 `rate-limit` + 授予多个范围 | **不变**：所有范围共用一份默认额度，跨范围合计每窗口最多 `rate-limit` 个（拆分后的版本曾错误地让每个范围各拿一整份，合计被放大，已修复） |
+| 只配 `rate-limit`，窗口切换时机 | **不变**：固定窗口整体重置；不会首窗口多放一批、也不会切换后卡着不放；同一时间序列重跑结果完全一致 |
+| 显式配置 `burst-limit` | 新行为：默认额度改按令牌桶计量（稳态匀速补充 + 突发余量），仍全客户端共用一份 |
+| 配置 `scope-quotas` | 新行为：被配置的范围各自独立令牌桶，不再占用共享默认额度；未配置的范围仍共用默认额度 |
 
 ### 并发安全
 
 - 客户端身份只存在 `ThreadLocal` 中，并在 `afterCompletion` 中无条件清理，线程池复用线程也不会身份串号；
 - 重放判定使用 `ConcurrentHashMap.compute` 原子完成，相同 nonce 并发提交有且仅有一个请求通过（有专项测试）；
-- 配额桶以 `(clientId, scope)` 为键存放在 `ConcurrentHashMap` 中，桶内"补充 → 判定 → 扣减"
-  在同一把锁内一次完成；令牌以整数毫令牌（×1000）运算、不使用浮点，因此突发见底时
-  并发压到边界（恰好最后一个放行、下一个拒绝）的结果与线程调度无关，重跑严格一致；
-- 桶只在请求通过身份与签名校验后创建，`scope` 取自服务端注解，伪造标识无法制造桶，桶总数有界。
+- 配额状态以 `(clientId, 范围键)` 为键存放在 `ConcurrentHashMap` 中：单独配置的范围
+  用具体 scope 作键，走默认配额的请求统一用共享键（整客户端一份）。桶内"补充 → 判定 → 扣减"
+  （或固定窗口的"窗口判定 → 计数"）在同一把锁内一次完成；令牌以整数毫令牌（×1000）运算、
+  不使用浮点，因此并发压到边界（恰好最后一个放行、下一个拒绝）的结果与线程调度无关，
+  重跑严格一致；
+- 桶/窗口只在请求通过身份与签名校验后创建，`scope` 取自服务端注解，伪造标识无法制造状态，状态总数有界。
 
 ## 2. 签名算法
 
@@ -126,7 +149,7 @@ curl -s http://localhost:8080/api/orders/get \
 | `AUTH_TIMESTAMP_EXPIRED` | 401 | 时间戳超出 ±skew 窗口：先对时再重试 |
 | `AUTH_REPLAY_DETECTED` | 409 | nonce 在窗口内重复使用，请生成新 nonce |
 | `ACCESS_DENIED` | 403 | 客户端没有该接口的 scope |
-| `RATE_LIMITED` | 429 | 超出该客户端在该接口范围上的配额（令牌桶见底），按稳态速率稍后重试；响应 message 带具体 scope 与 rate/burst 参数 |
+| `RATE_LIMITED` | 429 | 超出该客户端在该接口范围上的配额（令牌桶见底或固定窗口用尽），稍后重试；响应 message 带具体 scope 与计量参数 |
 | `PARAM_INVALID` | 400 | 参数错误，或访问了不存在/不属于自己的资源（不区分二者以防存在性泄露） |
 | `INTERNAL_ERROR` | 500 | 服务端内部错误，详情只记录在服务端日志 |
 
@@ -142,8 +165,8 @@ curl -s http://localhost:8080/api/orders/get \
 | `app.auth.clients.<id>.secret` | - | Base64 HMAC 密钥（必填） |
 | `app.auth.clients.<id>.owner` | - | 数据归属标识（必填） |
 | `app.auth.clients.<id>.scopes[n]` | 空 | 授予的接口范围列表 |
-| `app.auth.clients.<id>.rate-limit` | `100` | 默认稳态速率：每窗口稳定请求数，未单独配置的范围沿用 |
-| `app.auth.clients.<id>.burst-limit` | 等于 `rate-limit` | 默认突发上限（桶容量）；留空则与稳态速率相同，等价于无额外突发余量 |
+| `app.auth.clients.<id>.rate-limit` | `100` | 默认稳态速率：每窗口稳定请求数；未单独配置的所有范围共用这一份 |
+| `app.auth.clients.<id>.burst-limit` | 不配置 | 默认突发上限（桶容量）；**不配置时默认额度按固定窗口计量（老配置语义）**，配置后改按令牌桶计量 |
 | `app.auth.clients.<id>.scope-quotas[n].scope` | - | 单独配额对应的接口范围，如 `orders:read` |
 | `app.auth.clients.<id>.scope-quotas[n].rate-limit` | - | 该范围的稳态速率（每窗口补充数） |
 | `app.auth.clients.<id>.scope-quotas[n].burst-limit` | 等于该范围 `rate-limit` | 该范围的突发上限 |
@@ -154,9 +177,9 @@ curl -s http://localhost:8080/api/orders/get \
 其余没列出来的范围继续走默认 100：
 
 ```properties
-# 默认配额（对所有未单独配置的范围生效）
+# 默认配额（对所有未单独配置的范围生效，全客户端共用一份）
 app.auth.clients.client-x.rate-limit=100
-# burst-limit 不配时默认等于 rate-limit，老配置无需任何改动
+# burst-limit 不配时默认额度按固定窗口计量，老配置无需任何改动
 
 # 只读接口：稳态 3、突发 3（无额外余量）
 app.auth.clients.client-x.scope-quotas[0].scope=orders:read
@@ -171,20 +194,25 @@ app.auth.clients.client-x.scope-quotas[1].burst-limit=8
 
 **与老配置的兼容性**：
 
-- 只写 `rate-limit` 完全照旧可用：`burst-limit` 缺省取 `rate-limit`，不配 `scope-quotas`
-  时所有接口共用客户端默认桶；
-- 稳态窗口 `rate-window-seconds` 语义复用为令牌桶的补充周期，无需新增时间配置。
+- 只写 `rate-limit` 完全照旧可用：默认额度按固定窗口计量，窗口内放行
+  `rate-limit` 个、期满整体重置，与拆分前逐次一致；
+- 授予多个范围但没配 `scope-quotas` 时，所有范围**共用**同一份默认额度，
+  跨范围合计每窗口最多 `rate-limit` 个，不会被放大成"每个范围各一份"；
+- 稳态窗口 `rate-window-seconds` 语义复用为固定窗口长度 / 令牌桶补充周期，
+  无需新增时间配置。
 
 内置示例客户端：
 
-| clientId | owner | scopes | 默认稳态/突发 | 分范围配额 | 用途 |
+| clientId | owner | scopes | 默认额度 | 分范围配额 | 用途 |
 | --- | --- | --- | --- | --- | --- |
-| `client-a` | `tenant-a` | `orders:read` | 1000 / 1000 | 无 | 正常客户端 A |
-| `client-b` | `tenant-b` | `orders:read` | 1000 / 1000 | 无 | 正常客户端 B |
-| `client-limited` | `tenant-a` | `orders:read` | **3 / 3** | 无 | 配额临界值验证（老用例） |
-| `client-noread` | `tenant-a` | 无 | 1000 / 1000 | 无 | scope 越权验证 |
-| `client-multiscope` | `tenant-a` | `orders:read`、`orders:export` | 100 / 100 | read **3/3**、export **5/8** | 分范围独立、跨范围不串 |
-| `client-burst` | `tenant-a` | `orders:read` | **2 / 5** | 无 | 突发整波放行与边界并发 |
+| `client-a` | `tenant-a` | `orders:read` | 1000/窗口（固定窗口） | 无 | 正常客户端 A |
+| `client-b` | `tenant-b` | `orders:read` | 1000/窗口（固定窗口） | 无 | 正常客户端 B |
+| `client-limited` | `tenant-a` | `orders:read` | **3/窗口**（固定窗口） | 无 | 配额临界值验证（老用例） |
+| `client-noread` | `tenant-a` | 无 | 1000/窗口（固定窗口） | 无 | scope 越权验证 |
+| `client-multiscope` | `tenant-a` | `orders:read`、`orders:export` | 100/窗口（固定窗口） | read **3/3**、export **5/8**（令牌桶） | 分范围独立、跨范围不串 |
+| `client-burst` | `tenant-a` | `orders:read` | 稳态 **2**、突发 **5**（令牌桶） | 无 | 突发整波放行与边界并发 |
+| `client-legacy` | `tenant-a` | `orders:read`、`orders:export` | **3/窗口**（固定窗口，两范围共用） | 无 | 老配置合并计量回归 |
+| `client-mixed` | `tenant-a` | `orders:read`、`orders:export` | **3/窗口**（固定窗口，read 共用） | export **5/8**（令牌桶） | 分范围独立不被共享默认额度带坏 |
 
 > 生产环境请通过环境变量/配置中心下发密钥，并更换示例密钥。
 
@@ -196,7 +224,7 @@ app.auth.clients.client-x.scope-quotas[1].burst-limit=8
 mvn test
 ```
 
-覆盖场景（34 个用例）：
+覆盖场景（45 个用例）：
 
 - 验签成功 / 缺鉴权头 / 未知客户端 / 签名错误 / 签名与 body 不匹配；
 - 时间戳超窗拒绝、±3 秒时钟偏差放行；
@@ -208,10 +236,19 @@ mvn test
   按稳态速率平滑回收（不成片放开）、空闲再久也封顶在突发容量、
   同毫秒并发压界恰好放满容量（连跑多轮结果一致）、不同客户端/不同范围/组合键不串桶、
   rate=0 永不放行；
+- **固定窗口单元测试（可控时钟，老配置窗口一致性）**：首窗口严格放行 limit 个不多放、
+  窗口期满立即整体重置不卡着、稳态每窗口严格 limit 个、同一时间序列重跑结果逐位一致、
+  同毫秒并发压界恰好放行 limit 个（连跑多轮一致）、范围键/客户端之间互不影响、
+  limit=0 永不放行；
+- **老配置合并计量（client-legacy，多范围未单独配置）**：read+export 跨范围合计
+  恰好放行 3 个（不是每个范围各 3 个）；单方向打满后另一方向立即 429；
+  两范围 32 个并发压界合计恰好放行 3 个；
 - **分范围独立**：同一客户端 read 见底不影响 export，二者各按各的容量计数；
+  client-mixed 验证单独配置的 export（令牌桶 5/8）与共享默认额度（固定窗口 3）
+  互不挤占；
 - **跨范围并发不串**：两范围 64 个并发交叉，read 恰好成 3、export 恰好成 8；
 - **无效请求不计费**：伪造签名 / 未知 clientId / 缺头 / 过期时间戳乱打一批，
-  真实客户端的额度一个都不少；scope 越权请求也不占额度。
+  真实客户端的额度一个都不少（含 client-legacy 的共享默认额度）；scope 越权请求也不占额度。
 
 每个请求在日志中都能看到归属的**客户端与接口范围**，便于按维度追溯：
 

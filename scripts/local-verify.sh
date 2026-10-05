@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 本地冒烟验证：启动应用后依次演示
-# 正常/错误签名/重放/越权(scope)/跨租户/配额临界/分范围独立/突发余量/无效请求不计费
+# 正常/错误签名/重放/越权(scope)/跨租户/配额临界/分范围独立/突发余量/
+# 老配置多范围共享默认额度/混合客户端分范围独立/无效请求不计费
 set -u
 cd "$(dirname "$0")/.."
 
@@ -11,6 +12,8 @@ SECRET_NOREAD="secret-noread-secret-noread-secret-"
 SECRET_LIMITED="secret-limited-secret-limited-secret-"
 SECRET_MULTISCOPE="secret-multiscope-secret-multiscope-secret-"
 SECRET_BURST="secret-burst-secret-burst-secret-"
+SECRET_LEGACY="secret-legacy-secret-legacy-secret-"
+SECRET_MIXED="secret-mixed-secret-mixed-secret-"
 
 if ! command -v openssl >/dev/null || ! command -v curl >/dev/null; then
   echo "需要 openssl 与 curl" >&2
@@ -82,7 +85,7 @@ call client-noread "$SECRET_NOREAD" "nonce-$(date +%s%N)" '{"orderId":"ORD-1001"
 echo; echo; echo "== 5. 数据归属越权（client-a 查 tenant-b 的 ORD-2001）"
 call client-a "$SECRET_A" "nonce-$(date +%s%N)" '{"orderId":"ORD-2001"}'
 
-echo; echo; echo "== 6. 配额临界（client-limited 稳态/突发=3，连发 4 次）"
+echo; echo; echo "== 6. 配额临界（client-limited 固定窗口每窗口 3 次，连发 4 次）"
 for i in 1 2 3 4; do
   echo "--- 第 $i 次："
   call client-limited "$SECRET_LIMITED" "nonce-rl-$i-$(date +%s%N)" '{"orderId":"ORD-1001"}'
@@ -109,7 +112,31 @@ for i in $(seq 1 7); do
   echo
 done
 
-echo; echo "== 9. 无效请求不计费（伪造签名打 client-burst，随后真实额度应仍在）"
+echo; echo "== 9. 老配置多范围共享默认额度（client-legacy：read+export 共用 3/窗口，跨范围混合连发 4 次，预期 200,200,200,429）"
+echo "--- 9a. read 第 1 次："
+call client-legacy "$SECRET_LEGACY" "nonce-legacy-r1-$(date +%s%N)" '{}' /api/orders/list
+echo; echo "--- 9b. export 第 1 次："
+call client-legacy "$SECRET_LEGACY" "nonce-legacy-e1-$(date +%s%N)" '{}' /api/orders/export
+echo; echo "--- 9c. read 第 2 次（合计第 3 个，应放行）："
+call client-legacy "$SECRET_LEGACY" "nonce-legacy-r2-$(date +%s%N)" '{}' /api/orders/list
+echo; echo "--- 9d. export 第 2 次（合计第 4 个，应 429：跨范围合计不能超过同一份默认额度）："
+call client-legacy "$SECRET_LEGACY" "nonce-legacy-e2-$(date +%s%N)" '{}' /api/orders/export
+echo
+
+echo; echo "== 10. 混合客户端分范围独立（client-mixed：read 走共享默认 3/窗口，export 独立令牌桶 5/8）"
+echo "--- 10a. read 连发 4 次（预期 200,200,200,429，共享默认额度用尽）"
+for i in 1 2 3 4; do
+  call client-mixed "$SECRET_MIXED" "nonce-mixed-r$i-$(date +%s%N)" '{}' /api/orders/list
+  echo
+done
+echo "--- 10b. read 见底后 export 仍有独立突发 8 个（前 8 个 200、第 9 个 429）"
+for i in $(seq 1 9); do
+  echo "--- export 第 $i 次："
+  call client-mixed "$SECRET_MIXED" "nonce-mixed-e$i-$(date +%s%N)" '{}' /api/orders/export
+  echo
+done
+
+echo; echo "== 11. 无效请求不计费（伪造签名打 client-burst，随后真实额度应仍在）"
 for i in $(seq 1 5); do
   ts=$(date +%s); n="nonce-forged-$i-$(date +%s%N)"
   curl -s -o /dev/null -w "forged #$i [HTTP %{http_code}]\n" "$BASE/api/orders/list" \

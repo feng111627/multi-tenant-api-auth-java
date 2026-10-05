@@ -27,7 +27,9 @@ import org.springframework.web.servlet.HandlerInterceptor;
  *     <li>clientId 必须在注册表中；</li>
  *     <li>时间戳窗口、签名、重放检测（见 {@link SignatureService}）；</li>
  *     <li>接口 scope 校验；</li>
- *     <li>按「客户端 × 本次接口范围」维度做配额（令牌桶）判定。</li>
+ *     <li>配额判定：单独配置过配额的范围走独立的「客户端 × 范围」令牌桶；
+ *         未单独配置的范围共用客户端级默认额度（老配置为固定窗口，
+ *         显式配置了突发余量的为令牌桶）。</li>
  * </ol>
  *
  * <p><b>配额放在验签与 scope 校验之后</b>：任何未通过身份/签名/范围校验的请求都在
@@ -96,37 +98,42 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
                     "scope '" + required.value() + "' is not granted");
         }
 
-        QuotaProfile quota = resolveQuota(client, scope);
         long windowMillis = properties.getRateWindowSeconds() * 1000L;
-        boolean allowed = quotaService.tryAcquire(
-                client.clientId(), scope,
-                quota.rateLimit(), quota.burstLimit(), windowMillis);
+        QuotaProfile scoped = client.scopeQuotas().get(scope);
+        boolean allowed;
+        String quotaDesc;
+        if (scoped != null) {
+            // 该范围单独配置过配额：独立的 (clientId, scope) 令牌桶，各范围各算各的账
+            allowed = quotaService.tryAcquire(client.clientId(), scope,
+                    scoped.rateLimit(), scoped.burstLimit(), windowMillis);
+            quotaDesc = "scope quota rate=" + scoped.rateLimit()
+                    + " burst=" + scoped.burstLimit();
+        } else if (client.defaultBurstConfigured()) {
+            // 默认配额 + 显式突发：整个客户端共用同一个默认令牌桶（跨范围合计受同一份额度约束）
+            allowed = quotaService.tryAcquire(client.clientId(), QuotaService.DEFAULT_SCOPE,
+                    client.rateLimit(), client.burstLimit(), windowMillis);
+            quotaDesc = "shared default bucket rate=" + client.rateLimit()
+                    + " burst=" + client.burstLimit();
+        } else {
+            // 老配置（只配 rate-limit）：整个客户端共用同一个固定窗口，行为与拆分前一致
+            allowed = quotaService.tryAcquireFixedWindow(client.clientId(),
+                    QuotaService.DEFAULT_SCOPE, client.rateLimit(), windowMillis);
+            quotaDesc = "shared default fixed-window limit=" + client.rateLimit();
+        }
         if (!allowed) {
-            log.warn("quota exhausted clientId={} scope={} requestId={} rate={} burst={} window={}s",
-                    client.clientId(), scope, requestId,
-                    quota.rateLimit(), quota.burstLimit(), properties.getRateWindowSeconds());
+            log.warn("quota exhausted clientId={} scope={} requestId={} {} window={}s",
+                    client.clientId(), scope, requestId, quotaDesc,
+                    properties.getRateWindowSeconds());
             reject(requestId, client.clientId(), scope, ErrorCode.RATE_LIMITED,
-                    "rate limit " + quota.rateLimit() + " per "
-                            + properties.getRateWindowSeconds() + "s exceeded for scope '"
-                            + scope + "' (burst " + quota.burstLimit() + ")");
+                    "rate limit exceeded for scope '" + scope + "' ("
+                            + quotaDesc + ", window "
+                            + properties.getRateWindowSeconds() + "s)");
         }
 
         ClientContext.set(client);
         log.info("access granted clientId={} requestId={} owner={} scope={}",
                 client.clientId(), requestId, client.ownerId(), scope);
         return true;
-    }
-
-    /**
-     * 解析本次请求所在范围的有效配额：该范围单独配置过就用独立配额，
-     * 否则回落到客户端默认配额。注册表物化时已对 burstLimit 做过归一。
-     */
-    private static QuotaProfile resolveQuota(ClientCredentials client, String scope) {
-        QuotaProfile scoped = client.scopeQuotas().get(scope);
-        if (scoped != null) {
-            return scoped;
-        }
-        return new QuotaProfile(client.rateLimit(), client.burstLimit());
     }
 
     @Override

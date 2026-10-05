@@ -49,6 +49,7 @@ public class ClientRegistry {
                     cfg.getOwner(),
                     cfg.getRateLimit(),
                     normalizeBurst(cfg.getBurstLimit(), cfg.getRateLimit()),
+                    cfg.getBurstLimit() >= 0,
                     Map.copyOf(scopeQuotas)));
         });
         this.clients = Map.copyOf(map);
